@@ -1,17 +1,32 @@
 import Product from '../models/Product';
+import { ActivityService } from './activityService';
 
 interface CreateProductPayload {
   name: string; description: string; categories: string[]; tags: string[];
   usps: string[]; features: { name: string; description: string }[];
-  gallery: string[]; price?: number; purchaseLink?: string; seoMetadata?: { title: string; description: string };
+  gallery: string[]; price?: number; purchaseLink?: string; 
+  seoMetadata?: { title: string; description: string };
 }
 
-interface FilterOptions { category?: string; tags?: string[]; sort?: string; limit?: number; page?: number; search?: string; }
+interface FilterOptions { 
+  category?: string; tags?: string[]; sort?: string; 
+  limit?: number; page?: number; search?: string; 
+}
 
 export class ProductService {
-  static async create(payload: CreateProductPayload): Promise<any> {
+  static async create(payload: CreateProductPayload, userId: string): Promise<any> {
     const product = new Product(payload);
     await product.save();
+    
+    // Log activity
+    await ActivityService.logActivity({
+      type: 'product_created',
+      description: `Created product "${product.name}"`,
+      userId,
+      targetId: product._id.toString(),
+      targetName: product.name
+    });
+    
     return product;
   }
 
@@ -23,7 +38,7 @@ export class ProductService {
 
     const sort: any = options.sort === 'ratings' ? { 'reviews.rating': -1 } : { popularity: -1 };
     const limit = options.limit || 20;
-    const skip = (options.page || 1 - 1) * limit;
+    const skip = ((options.page || 1) - 1) * limit;
 
     return Product.find(query).sort(sort).limit(limit).skip(skip);
   }
@@ -34,31 +49,70 @@ export class ProductService {
     return product;
   }
 
-  static async update(id: string, payload: Partial<CreateProductPayload>): Promise<any> {
+  static async update(id: string, payload: Partial<CreateProductPayload>, userId: string): Promise<any> {
     const product = await Product.findByIdAndUpdate(id, payload, { new: true });
     if (!product) throw new Error('Product not found');
+    
+    // Log activity
+    await ActivityService.logActivity({
+      type: 'product_updated',
+      description: `Updated product "${product.name}"`,
+      userId,
+      targetId: product._id.toString(),
+      targetName: product.name
+    });
+    
     return product;
   }
 
-  static async delete(id: string): Promise<void> {
-    const product = await Product.findByIdAndDelete(id);
+  static async delete(id: string, userId: string): Promise<void> {
+    const product = await Product.findById(id);
     if (!product) throw new Error('Product not found');
+    
+    const productName = product.name;
+    await Product.findByIdAndDelete(id);
+    
+    // Log activity
+    await ActivityService.logActivity({
+      type: 'product_deleted',
+      description: `Deleted product "${productName}"`,
+      userId,
+      targetId: id,
+      targetName: productName
+    });
   }
 
-  // PRD: Comparison - Fetch multiple for table
-  static async compare(ids: string[]): Promise<any[]> {
-    if (ids.length > 3 || ids.length < 2) throw new Error('Select 2-3 products');
-    return Promise.all(ids.map(id => this.getById(id)));
+  static async getTrending(): Promise<any> {
+    return Product.find().sort({ popularity: -1 }).limit(10);
   }
 
-  // PRD: Trending/Widgets - Top by popularity/ratings
-  static async getTrending(category?: string, limit = 5): Promise<any[]> {
-    let query: any = {};
-    if (category) query.categories = { $in: [category] };
-    return Product.find(query).sort({ popularity: -1, 'reviews.rating': -1 }).limit(limit);
+  static async getByIds(ids: string[]): Promise<any> {
+    return Product.find({ _id: { $in: ids } });
   }
 
-  // PRD: Add review (embedded)
+  static async getAnalytics(): Promise<any> {
+    const totalProducts = await Product.countDocuments();
+    const categoryStats = await Product.aggregate([
+      { $unwind: '$categories' },
+      { $group: { _id: '$categories', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+    
+    const avgRating = await Product.aggregate([
+      { $unwind: '$reviews' },
+      { $group: { _id: null, avgRating: { $avg: '$reviews.rating' } } }
+    ]);
+
+    const topProducts = await Product.find().sort({ popularity: -1 }).limit(5);
+    
+    return {
+      totalProducts,
+      categoryStats,
+      avgRating: avgRating[0]?.avgRating || 0,
+      topProducts
+    };
+  }
+
   static async addReview(productId: string, review: { user: string; rating: number; comment: string }): Promise<any> {
     const product = await Product.findById(productId);
     if (!product) throw new Error('Product not found');
